@@ -114,7 +114,7 @@ def parse_midi_file(song_path, bars_per_segment=4):
     
     segments = [[] for _ in range(total_bars)]
     for m in song:
-        i = int(m[-1] // time_per_segment // bars_per_segment)
+        i = int(m[-1] // time_per_segment // 4)
         segments[i].append([m[0], m[1], m[2]])
 
     def validate_segment(s):

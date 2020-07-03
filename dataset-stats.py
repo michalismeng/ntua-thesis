@@ -2,6 +2,7 @@ import pretty_midi as pm
 import numpy as np
 import joblib
 import os
+import glob
 import pandas as pd
 
 import matplotlib.pyplot as plt
@@ -20,17 +21,16 @@ def get_dataset_stats(df):
     
     return stats
 
-jsb = joblib.load('dataset/JSB-df.pickle')
-nmd = joblib.load('dataset/NMD-df.pickle')
-jaz = joblib.load('dataset/JAZZ_MV-df.pickle')
-mst = joblib.load('dataset/MAESTRO_18-df.pickle')
+datasets = glob.glob("dataset/*-df.pickle")
+series = []
+for dataset in sorted(datasets):
+    df = joblib.load(dataset)
+    name = dataset.split('/')[1].split('-df.pickle')[0]
+    series.append(pd.Series(get_dataset_stats(df), name=name))
 
-s1 = pd.Series(get_dataset_stats(jsb), name='JSB')
-s2 = pd.Series(get_dataset_stats(nmd), name='NMD')
-s3 = pd.Series(get_dataset_stats(jaz), name='JAZZ')
-s4 = pd.Series(get_dataset_stats(mst), name='MAESTRO')
+df_plot = pd.DataFrame(series)
 
-df_plot = pd.DataFrame([s1, s2, s3, s4])
+print(df_plot)
 
 plt.figure()
 sns.barplot(df_plot.index, df_plot['song_count'])
