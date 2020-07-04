@@ -59,8 +59,9 @@ for (dataset, pct) in zip(datasets, keep_pcts):
     del segments
 
 print('train length - test length')
-print(len(train_segments[0]), len(test_segments[0]))
-print(len(train_segments[1]), len(test_segments[1]))
+for dataset, train_segment, test_segment in zip(datasets, train_segments, test_segments):
+    name = dataset.split('/')[1].split('-raw.pickle')[0] 
+    print(name, len(train_segment), len(test_segment))
 
 input("Press Enter to continue...")
 
@@ -92,12 +93,16 @@ if(os.path.exists(save_path) == False):
     os.makedirs(save_path)
 copyfile(config_file, save_path + 'train.conf') 
 
+with open(save_path + 'model.txt', 'w') as f:
+    vae.model().summary(print_fn=lambda x: f.write(x + '\n'))
+
 # print('loading weights')
 # vae.load_weights('vae_model1/weights/weights.553')
 callbacks = [
     tfk.callbacks.LambdaCallback(on_epoch_end=lambda epoch,_: generate_and_save_samples(vae, epoch, save_path, int(args["cat_dim"]))),
     tfk.callbacks.LambdaCallback(on_epoch_start=lambda epoch,_: vae.reset_trackers()),
-    
+
+    tfk.callbacks.CSVLogger(save_path + 'log.csv'),    
     tfk.callbacks.ModelCheckpoint(save_path + 'weights/' + '/weights.{epoch:02d}', monitor='val_p_acc', save_weights_only=True, save_best_only=True, mode='max'),
     tfk.callbacks.TensorBoard(log_dir=save_path, write_graph=True, update_freq='epoch', histogram_freq=40, profile_batch='10,20')
 ]
