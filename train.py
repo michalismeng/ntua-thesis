@@ -9,6 +9,7 @@ import os
 import sys
 import joblib
 from generate_core import MGenerator
+import signal
 from sklearn.model_selection import train_test_split
 
 def generate_and_save_samples(vae, epoch, path, n_genres):
@@ -36,6 +37,11 @@ def parse_configuration(config):
         args[k] = v
     return args
 
+# capture Ctrl+C
+def signal_handler(sig, frame):
+    print('saving final weights...')
+    vae.save_weights(save_path + 'weights/weights-final')
+    sys.exit(0)
 
 # read configuration files
 config_file = sys.argv[1] if len(sys.argv) == 2 else 'train.conf'
@@ -96,8 +102,12 @@ copyfile(config_file, save_path + 'train.conf')
 with open(save_path + 'model.txt', 'w') as f:
     vae.model().summary(print_fn=lambda x: f.write(x + '\n'))
 
+# register handler for Ctrl+C in order to save final weights
+signal.signal(signal.SIGINT, signal_handler)
+
 # print('loading weights')
 # vae.load_weights('vae_model1/weights/weights.553')
+
 callbacks = [
     tfk.callbacks.LambdaCallback(on_epoch_end=lambda epoch,_: generate_and_save_samples(vae, epoch, save_path, int(args["cat_dim"]))),
     tfk.callbacks.LambdaCallback(on_epoch_start=lambda epoch,_: vae.reset_trackers()),

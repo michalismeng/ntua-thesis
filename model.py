@@ -359,15 +359,17 @@ class MVAE(tfk.Model):
                  "style_loss": self.style_loss_tracker.result(), "l_r": self.learning_rate,
                  "p_acc": self.p_acc_tracker.result(), "dt_acc": self.dt_acc_tracker.result(), "dur_acc": self.d_acc_tracker.result() }
     
-    # should be used only for model summary -- computation is wrong
+    # should be used only for model summary -- computation is wrong -- dimensionality is right (we hope)
     def model(self):
         X = tfk.Input(shape=(None, self.x_dim), name='network_input')
         X_embed = self.embed_input(X)
         
         mean, logvar, z_cat = self.encode(X_embed)
+        z_cat = tf.linalg.matmul(z_cat, self.style_embedding)
+
         z = tf.concat([mean, z_cat], axis=-1)
-        output = self.decode(z, X_embed, 1)   # this is semantically incorrect as decode expects the reparametrized Z. 
-                                                 # but here we only care about the shape
+
+        output = self.decode(z, X_embed, 1)
         
         return tfk.Model(inputs=X, outputs=output, name='MVAE')
 
