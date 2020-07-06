@@ -51,6 +51,7 @@ x_depth = [int(d) for d in args["x_depth"].split()]
 keep_pcts = [float(d) for d in args["keep_pct"].split()]
 master_pct = float(args["master_pct"])
 datasets = args["dataset"].split()
+rnn_type = 'lstm' if args.get('rnn_type') is None else args['rnn_type']
 
 print('loading datasets...')
 train_segments = []
@@ -85,7 +86,8 @@ vae = MVAE(x_depth=x_depth,
            cont_dim=args["cont_dim"], cat_dim=args["cat_dim"], mu_force=args["mu_force"],
            t_gumbel=args["t_gumbel"], style_embed_dim=args["style_embed_dim"],
            kl_reg=args["kl_reg"],
-           beta_anneal_steps=args["kl_anneal"])
+           beta_anneal_steps=args["kl_anneal"],
+           rnn_type=rnn_type)
 
 optimizer = tfk.optimizers.Adam(learning_rate=5e-4)
 vae.compile(optimizer=optimizer)
@@ -106,18 +108,18 @@ with open(save_path + 'model.txt', 'w') as f:
 signal.signal(signal.SIGINT, signal_handler)
 
 # print('loading weights')
-# vae.load_weights('vae_model1/weights/weights.553')
+# vae.load_weights('gru_jsb_nmd/weights/weights-final')
 
 callbacks = [
     tfk.callbacks.LambdaCallback(on_epoch_end=lambda epoch,_: generate_and_save_samples(vae, epoch, save_path, int(args["cat_dim"]))),
     tfk.callbacks.LambdaCallback(on_epoch_start=lambda epoch,_: vae.reset_trackers()),
 
-    tfk.callbacks.CSVLogger(save_path + 'log.csv'),    
+    tfk.callbacks.CSVLogger(save_path + 'log.csv', append=True),    
     tfk.callbacks.ModelCheckpoint(save_path + 'weights/' + '/weights.{epoch:02d}', monitor='val_p_acc', save_weights_only=True, save_best_only=True, mode='max'),
     tfk.callbacks.TensorBoard(log_dir=save_path, write_graph=True, update_freq='epoch', histogram_freq=40, profile_batch='10,20')
 ]
 
 history = vae.fit(train_iterator, epochs=int(args["epochs"]), callbacks=callbacks, validation_data=test_iterator)
-# history = vae.fit(train_iterator, epochs=1000, initial_epoch=553, callbacks=callbacks, validation_data=test_iterator)
+# history = vae.fit(train_iterator, epochs=1001, initial_epoch=800, callbacks=callbacks, validation_data=test_iterator)
 
 vae.save_weights(save_path + 'weights/weights-final')

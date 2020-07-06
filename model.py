@@ -10,7 +10,7 @@ import numpy as np
 
 class MVAE(tfk.Model):
     def __init__(self, x_depth, enc_rnn_dim, enc_dropout, dec_rnn_dim, dec_dropout, cont_dim, cat_dim, mu_force, t_gumbel, 
-                       style_embed_dim, beta_anneal_steps, kl_reg):
+                       style_embed_dim, beta_anneal_steps, kl_reg, rnn_type='lstm'):
         super(MVAE, self).__init__()
         
         self.summaries = []
@@ -25,6 +25,7 @@ class MVAE(tfk.Model):
         self.mu_force = float(mu_force)
         self.beta_anneal_steps = int(beta_anneal_steps)
         self.kl_reg = float(kl_reg)
+        self.rnn_type = rnn_type
 
         enc_rnn_dim = int(enc_rnn_dim)
         enc_dropout = float(enc_dropout)
@@ -37,12 +38,15 @@ class MVAE(tfk.Model):
 
         # music content variables
         self.pitch_embedding = tfkl.Embedding(x_depth[0], self.content_embed_dim, name='pitch_embedding')
-        self.lstm_encoder = tfkl.Bidirectional(tfkl.LSTM(enc_rnn_dim, dropout=enc_dropout, return_state=True), name='lstm_encoder')
+        self.lstm_encoder = tfkl.Bidirectional(self.create_rnn_layer(enc_rnn_dim, dropout=enc_dropout, return_state=True), name='lstm_encoder')
         self.content_head = tfkl.Dense(512, activation='relu', name='content_head')
         self.z_params = tfkl.Dense(self.cont_dim + self.cont_dim, name='z_params')
         
-        self.decoder_init_state = tfkl.Dense(dec_rnn_dim * 2, name='decoder_init', activation='tanh')
-        self.lstm_decoder = tfkl.LSTM(dec_rnn_dim, return_sequences=True, return_state=True, dropout=dec_dropout, name='lstm_decoder')
+        # only one of those layers is used, based on rnn_type
+        self.lstm_decoder_init_state = tfkl.Dense(dec_rnn_dim * 2, name='lstm_decoder_init', activation='tanh')
+        self.gru_decoder_init_state = tfkl.Dense(dec_rnn_dim, name='gru_decoder_init', activation='tanh')
+
+        self.lstm_decoder = self.create_rnn_layer(dec_rnn_dim, dropout=dec_dropout, return_state=True, return_sequences=True, name='lstm_decoder')
         self.logit_layer = tfkl.Dense(self.x_dim, name='content_logits')
         
         self.anneal_step = tf.Variable(0.0, trainable=False)
@@ -74,6 +78,23 @@ class MVAE(tfk.Model):
         
         # generic accuracy used for computing raw accuracies
         self.accuracy_tracker = tfk.metrics.Accuracy(name='accuracy_tracker')
+
+    def get_initial_rnn_state(self, Z):
+        if self.rnn_type == 'lstm':
+            return tf.split(self.lstm_decoder_init_state(Z), 2, axis=-1)
+        elif self.rnn_type == 'gru':
+            return self.gru_decoder_init_state(Z)
+        else:
+            return None
+
+    def create_rnn_layer(self, rnn_dim, **kwargs):
+        if self.rnn_type == 'lstm':
+            return tfkl.LSTM(rnn_dim, **kwargs)
+        elif self.rnn_type == 'gru':
+            return tfkl.GRU(rnn_dim, **kwargs)
+        else:
+            print('rnn_type not understood: ', rnn_type)
+            exit(1)
         
     def reset_trackers(self):
         self.recon_loss_tracker.reset_states()
@@ -93,8 +114,36 @@ class MVAE(tfk.Model):
         self.val_p_acc_tracker.reset_states()
         self.val_dt_acc_tracker.reset_states()
         self.val_d_acc_tracker.reset_states()
+
+    def call_encoder_rnn(self, X_embed, S, training):
+        # create mask for padded inputs. Ignore <end> token. TODO: should stop gradient?
+        if S is not None:  # S is None only when generating the graph model => to get the model summary
+            mask = tf.sequence_mask(S - 1, tf.math.reduce_max(S), dtype=tf.bool)
+        else:
+            mask = None
+
+        if self.rnn_type == 'lstm':
+            output, h_fw, c_fw, h_bw, c_bw = self.lstm_encoder(X_embed, mask=mask, training=training)
+            s_fw, s_bw = c_fw, c_bw  # use only cell states since they contain all the intuition from the previous units
+        elif self.rnn_type == 'gru':
+            output, s_fw, s_bw = self.lstm_encoder(X_embed, mask=mask, training=training)
         
-      
+        states = tf.concat([s_fw, s_bw], axis=-1)
+        return output, states
+
+    def call_decoder_rnn(self, X, init_state, S, training):
+        if S is not None:
+            mask = tf.sequence_mask(S, dtype=tf.bool)
+        else:
+            mask = None
+
+        if self.rnn_type == 'lstm':
+            output, _, _ = self.lstm_decoder(X, training=training, mask=mask, initial_state=init_state)
+        elif self.rnn_type == 'gru':
+            output, _ = self.lstm_decoder(X, training=training, initial_state=init_state)
+
+        return output
+
     def embed_input(self, X):
         p, dt, d = tf.split(X, self.x_depth, axis=-1)
         
@@ -108,16 +157,7 @@ class MVAE(tfk.Model):
         return tf.zeros(shape=(batch_size, 1, self.x_dim), dtype=tf.float32)
         
     def encode(self, X_embed, S=None, training=True):
-        
-        # create mask for padded inputs. Ignore <end> token. TODO: should stop gradient?
-        if S != None:  # S is None only when generation graph model => to get the model summary
-            mask = tf.sequence_mask(S - 1, tf.math.reduce_max(S), dtype=tf.bool)
-            output, h_fw, c_fw, h_bw, c_bw = self.lstm_encoder(X_embed, mask=mask, training=training)
-        else:
-            output, h_fw, c_fw, h_bw, c_bw = self.lstm_encoder(X_embed, training=training)
-        
-        # use only cell states since they contain all the intuition from the previous units
-        states = tf.concat([c_fw, c_bw], axis=-1)
+        output, states = self.call_encoder_rnn(X_embed, S, training)
         
         cont_head = self.content_head(states)
         z_params = self.z_params(cont_head)
@@ -140,22 +180,18 @@ class MVAE(tfk.Model):
 
     def decode(self, Z, X_embed, timesteps, S=None, training=True):
         # timesteps = tf.max(S)
-        init_state = tf.split(self.decoder_init_state(Z), 2, axis=-1)
+        init_state = self.get_initial_rnn_state(Z)
         
         start_token = self.create_start_token(tf.shape(Z)[0])
         start_token = self.embed_input(start_token)
         
         # add start_token to the beginning of the sequence and discard end token from the sequence
         o_p = tf.concat([start_token, X_embed[:, :-1, :]], axis=1)
+
+        ouptut = self.call_decoder_rnn(o_p, init_state, S, training)
                 
-        if S != None:  # S is None only when generation graph model => to get the model summary
-            mask = tf.sequence_mask(S, dtype=tf.bool)
-            o_p, _, _ = self.lstm_decoder(o_p, training=training, mask=mask, initial_state=init_state)
-        else:
-            o_p, _, _ = self.lstm_decoder(o_p, training=training, initial_state=init_state)
-            
         # we require that output equal to network input X (with the final <END> token) as a seq2seq.
-        logits = self.logit_layer(o_p)
+        logits = self.logit_layer(ouptut)
         return logits
     
     # generate batch_size random pieces of the given style
@@ -185,14 +221,11 @@ class MVAE(tfk.Model):
             
             z = tf.concat([z_cont, z_cat], axis=-1)
             
-            init = self.decoder_init_state(z)
-            
-            state = tf.split(init, 2, axis=-1)
-            
-            
+            state = self.get_initial_rnn_state(z)
+
             for _ in range(max_iterations):
                 x_embed = self.embed_input(x)
-                o, s_h, s_c = self.lstm_decoder(x_embed, training=False, initial_state=state)
+                o = self.call_decoder_rnn(x_embed, init_state=state, S=None, training=False)
                 
                 # only keep the final output
                 o = o[:, -1, :]
