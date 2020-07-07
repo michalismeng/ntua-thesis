@@ -10,7 +10,7 @@ import numpy as np
 
 class MVAE(tfk.Model):
     def __init__(self, x_depth, enc_rnn_dim, enc_dropout, dec_rnn_dim, dec_dropout, cont_dim, cat_dim, mu_force, t_gumbel, 
-                       style_embed_dim, beta_anneal_steps, kl_reg, rnn_type='lstm'):
+                       style_embed_dim, beta_anneal_steps, kl_reg, rnn_type, attention):
         super(MVAE, self).__init__()
         
         self.summaries = []
@@ -26,6 +26,7 @@ class MVAE(tfk.Model):
         self.beta_anneal_steps = int(beta_anneal_steps)
         self.kl_reg = float(kl_reg)
         self.rnn_type = rnn_type
+        self.attention = attention
 
         enc_rnn_dim = int(enc_rnn_dim)
         enc_dropout = float(enc_dropout)
@@ -55,6 +56,12 @@ class MVAE(tfk.Model):
         self.cat_head = tfkl.Dense(512, activation='relu', name='style_head')
         self.z_cat_logit = tfkl.Dense(self.cat_dim, name='z_cat_logit')
         self.style_embedding = tf.Variable(tf.random.uniform([self.cat_dim, style_embed_dim], -1.0, 1.0), trainable=True, name="style_embedding")
+
+        # Luong attention
+        self.query_layer = tfkl.Dense(self.attention)
+        self.key_layer = tfkl.Dense(self.attention)
+        self.attention_layer = tfkl.Attention(use_scale=True, causal=True, dropout=0.2, name='attention_layer')
+
         
         # train metric trackers
         self.recon_loss_tracker = tfk.metrics.Mean(name="recon_loss_tracker")
@@ -118,7 +125,7 @@ class MVAE(tfk.Model):
     def call_encoder_rnn(self, X_embed, S, training):
         # create mask for padded inputs. Ignore <end> token. TODO: should stop gradient?
         if S is not None:  # S is None only when generating the graph model => to get the model summary
-            mask = tf.sequence_mask(S - 1, tf.math.reduce_max(S), dtype=tf.bool)
+            mask = tf.stop_gradient(tf.sequence_mask(S - 1, tf.math.reduce_max(S), dtype=tf.bool))
         else:
             mask = None
 
@@ -133,9 +140,16 @@ class MVAE(tfk.Model):
 
     def call_decoder_rnn(self, X, init_state, S, training):
         if S is not None:
-            mask = tf.sequence_mask(S, dtype=tf.bool)
+            mask = tf.stop_gradient(tf.sequence_mask(S, dtype=tf.bool))
         else:
             mask = None
+
+        if self.attention > 0:
+            keys = self.key_layer(X)
+            queries = self.query_layer(X)
+            attn = self.attention_layer([queries, keys], [mask, mask], training=training)
+
+            X = tf.concat([X, attn], axis=-1)
 
         if self.rnn_type == 'lstm':
             output, _, _ = self.lstm_decoder(X, training=training, mask=mask, initial_state=init_state)

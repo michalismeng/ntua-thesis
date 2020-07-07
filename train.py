@@ -52,6 +52,7 @@ keep_pcts = [float(d) for d in args["keep_pct"].split()]
 master_pct = float(args["master_pct"])
 datasets = args["dataset"].split()
 rnn_type = 'lstm' if args.get('rnn_type') is None else args['rnn_type']
+attention = 0 if args.get('attention') is None else int(args['attention'])
 
 print('loading datasets...')
 train_segments = []
@@ -87,7 +88,7 @@ vae = MVAE(x_depth=x_depth,
            t_gumbel=args["t_gumbel"], style_embed_dim=args["style_embed_dim"],
            kl_reg=args["kl_reg"],
            beta_anneal_steps=args["kl_anneal"],
-           rnn_type=rnn_type)
+           rnn_type=rnn_type, attention=attention)
 
 optimizer = tfk.optimizers.Adam(learning_rate=5e-4)
 vae.compile(optimizer=optimizer)
