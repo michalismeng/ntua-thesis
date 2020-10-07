@@ -95,6 +95,9 @@ def parse_midi_file(song_path, bars_per_segment=4):
         if not ins.is_drum:
             for n in ins.notes:
                 midi_notes.append((n.pitch, n.start, n.end))
+
+    if len(midi_notes) == 0:
+        return None
                 
     # sort by (start time, pitch)
     midi_notes = sorted(midi_notes, key=lambda x: (x[1], x[0]))

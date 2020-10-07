@@ -33,6 +33,8 @@ class MVAE(tfk.Model):
         dec_rnn_dim = int(dec_rnn_dim)
         dec_dropout = float(dec_dropout)
         style_embed_dim = int(style_embed_dim)
+
+        self.enc_rnn_dim = enc_rnn_dim
         
         self.ohc = tfp.distributions.OneHotCategorical
         self.relaxed_ohc = tfp.distributions.RelaxedOneHotCategorical
@@ -243,7 +245,7 @@ class MVAE(tfk.Model):
                 
                 # only keep the final output
                 o = o[:, -1, :]
-                o = tf.reshape(o, shape=(-1, 1, 512))
+                o = tf.reshape(o, shape=(-1, 1, self.enc_rnn_dim))
                 
                 # compute logits
                 logits = self.logit_layer(o)

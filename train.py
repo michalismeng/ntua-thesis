@@ -11,6 +11,39 @@ import joblib
 from generate_core import MGenerator
 import signal
 from sklearn.model_selection import train_test_split
+import numpy as np
+import pandas as pd
+
+import pypianoroll
+
+def merge_dicts(*dicts):
+    d = {}
+    for dict in dicts:
+        for key in dict:
+            try:
+                d[key].extend(dict[key])
+            except KeyError:
+                d[key] = dict[key]
+    return d
+
+def get_metrics_from_midi(path):
+    metrics = {}
+
+    try:
+        track = pypianoroll.Multitrack(path)
+        proll = track.get_merged_pianoroll()
+
+        metrics["pitches"] = [pypianoroll.metrics.n_pitches_used(proll)]
+        metrics["pitch_classes"] = [pypianoroll.metrics.n_pitch_classes_used(proll)]
+        metrics["empty_beats"] = [pypianoroll.metrics.empty_beat_rate(proll, track.beat_resolution)]
+        metrics["polyphony_1"] = [pypianoroll.metrics.polyphonic_rate(proll, threshold=1)]
+        metrics["polyphony_2"] = [pypianoroll.metrics.polyphonic_rate(proll, threshold=2)]
+        metrics["polyphony_3"] = [pypianoroll.metrics.polyphonic_rate(proll, threshold=3)]
+        metrics["polyphony_4"] = [pypianoroll.metrics.polyphonic_rate(proll, threshold=4)]
+    except:
+        pass
+    
+    return metrics
 
 def generate_and_save_samples(vae, epoch, path, n_genres):
     if epoch % 40 != 0:
@@ -22,10 +55,47 @@ def generate_and_save_samples(vae, epoch, path, n_genres):
 
     # TODO: Fix these magic numbers
     gen = MGenerator(21, 108, vae.x_depth, vae)
+
+    genre_metrics = [{} for _ in range(n_genres)]
+
     for genre in range(n_genres):
-        midis = gen.generate(genre, 5)
+        midis = gen.generate(genre, 50)
+        metrics = {}
+
         for i, midi in enumerate(midis):
             midi.write("{}/genre-{}-{}.mid".format(save_path, genre, i))
+            ms = get_metrics_from_midi("{}/genre-{}-{}.mid".format(save_path, genre, i))
+            metrics = merge_dicts(metrics, ms)
+
+        metrics = {
+            "pitches_mean": np.average(metrics["pitches"]),
+            "pitches_std": np.std(metrics["pitches"]),
+
+            "pitch_classes_mean": np.average(metrics["pitch_classes"]),
+            "pitch_classes_std": np.std(metrics["pitch_classes"]),
+
+            "empty_beats_mean": np.average(metrics["empty_beats"]),
+            "empty_beats_std": np.std(metrics["empty_beats"]),
+
+            "polyphony_1_mean": np.average(metrics["polyphony_1"]),
+            "polyphony_1_std": np.std(metrics["polyphony_1"]),
+
+            "polyphony_2_mean": np.average(metrics["polyphony_2"]),
+            "polyphony_2_std": np.std(metrics["polyphony_2"]),
+
+            "polyphony_3_mean": np.average(metrics["polyphony_3"]),
+            "polyphony_3_std": np.std(metrics["polyphony_3"]),
+
+            "polyphony_4_mean": np.average(metrics["polyphony_4"]),
+            "polyphony_4_std": np.std(metrics["polyphony_4"]),
+        }
+        genre_metrics[genre] = metrics
+
+    series = []
+    for i, stats in enumerate(genre_metrics):
+        series.append(pd.Series(stats, name=str(i)))
+    df_plot = pd.DataFrame(series)
+    df_plot.to_csv("{}/stats.csv".format(save_path))
     
 
 def parse_configuration(config):
@@ -68,7 +138,7 @@ for (dataset, pct) in zip(datasets, keep_pcts):
 
 print('train length - test length')
 for dataset, train_segment, test_segment in zip(datasets, train_segments, test_segments):
-    name = dataset.split('/')[1].split('-raw.pickle')[0] 
+    name = dataset.split('/')[2].split('-raw.pickle')[0] 
     print(name, len(train_segment), len(test_segment))
 
 input("Press Enter to continue...")

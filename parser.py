@@ -56,5 +56,5 @@ def build_dataframe_for_dataset(dataset_name, files, save_path, bars_per_segment
     return data_df, data_raw
 
 for dataset, name, bps in zip(datasets, names, bars_per_segment):
-    files = glob.glob(dataset + '/*')
+    files = glob.glob(dataset + '/*.mid')
     df, raw = build_dataframe_for_dataset(name, files, args.save_path, bps, save_pickle=True)
