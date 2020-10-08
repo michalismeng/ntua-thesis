@@ -14,37 +14,10 @@ import pandas as pd
 
 import pypianoroll
 
-def merge_dicts(*dicts):
-    d = {}
-    for dict in dicts:
-        for key in dict:
-            try:
-                d[key].extend(dict[key])
-            except KeyError:
-                d[key] = dict[key]
-    return d
-
-def get_metrics_from_midi(path):
-    metrics = {}
-
-    try:
-        track = pypianoroll.Multitrack(path)
-        proll = track.get_merged_pianoroll()
-
-        metrics["pitches"] = [pypianoroll.metrics.n_pitches_used(proll)]
-        metrics["pitch_classes"] = [pypianoroll.metrics.n_pitch_classes_used(proll)]
-        metrics["empty_beats"] = [pypianoroll.metrics.empty_beat_rate(proll, track.beat_resolution)]
-        metrics["polyphony_1"] = [pypianoroll.metrics.polyphonic_rate(proll, threshold=1)]
-        metrics["polyphony_2"] = [pypianoroll.metrics.polyphonic_rate(proll, threshold=2)]
-        metrics["polyphony_3"] = [pypianoroll.metrics.polyphonic_rate(proll, threshold=3)]
-        metrics["polyphony_4"] = [pypianoroll.metrics.polyphonic_rate(proll, threshold=4)]
-    except:
-        pass
-    
-    return metrics
+from dataset_stats_core import merge_dicts, get_metrics_from_midi, get_average_metrics
 
 def generate_and_save_samples(vae, epoch, path, n_genres):
-    if epoch % 10 != 0:
+    if epoch % 20 != 0:
         return
 
     save_path = "{}/samples/epoch-{}".format(path, epoch)
@@ -57,7 +30,7 @@ def generate_and_save_samples(vae, epoch, path, n_genres):
     genre_metrics = [{} for _ in range(n_genres)]
 
     for genre in range(n_genres):
-        midis = gen.generate(genre, 10)
+        midis = gen.generate(genre, 50)
         metrics = {}
 
         for i, midi in enumerate(midis):
@@ -65,29 +38,7 @@ def generate_and_save_samples(vae, epoch, path, n_genres):
             ms = get_metrics_from_midi("{}/genre-{}-{}.mid".format(save_path, genre, i))
             metrics = merge_dicts(metrics, ms)
 
-        metrics = {
-            "pitches_mean": np.average(metrics["pitches"]),
-            "pitches_std": np.std(metrics["pitches"]),
-
-            "pitch_classes_mean": np.average(metrics["pitch_classes"]),
-            "pitch_classes_std": np.std(metrics["pitch_classes"]),
-
-            "empty_beats_mean": np.average(metrics["empty_beats"]),
-            "empty_beats_std": np.std(metrics["empty_beats"]),
-
-            "polyphony_1_mean": np.average(metrics["polyphony_1"]),
-            "polyphony_1_std": np.std(metrics["polyphony_1"]),
-
-            "polyphony_2_mean": np.average(metrics["polyphony_2"]),
-            "polyphony_2_std": np.std(metrics["polyphony_2"]),
-
-            "polyphony_3_mean": np.average(metrics["polyphony_3"]),
-            "polyphony_3_std": np.std(metrics["polyphony_3"]),
-
-            "polyphony_4_mean": np.average(metrics["polyphony_4"]),
-            "polyphony_4_std": np.std(metrics["polyphony_4"]),
-        }
-        genre_metrics[genre] = metrics
+        genre_metrics[genre] = get_average_metrics(metrics)
 
     series = []
     for i, stats in enumerate(genre_metrics):
@@ -115,7 +66,6 @@ def create_model_and_train(train_segments, test_segments, x_depth, batch_size,
     vae.compile(optimizer=optimizer)
     vae.run_eagerly = True
 
-    now = datetime.now()
     save_path = save_path
 
     if(os.path.exists(save_path) == False):
