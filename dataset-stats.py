@@ -13,7 +13,7 @@ import pypianoroll
 
 from dataset_stats_core import get_dataset_stats, get_dataset_metrics
 
-bars_in_segment = 16
+bars_in_segment = 4
 datasets = glob.glob(f"datasets/dataset-{bars_in_segment}/*-df.pickle")
 series = []
 

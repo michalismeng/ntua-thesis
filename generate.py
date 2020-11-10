@@ -9,64 +9,45 @@ import os
 import sys
 import numpy as np
 from scipy.io import wavfile
-from midi2audio import FluidSynth
 from generate_core import MGenerator
-
-
-def parse_configuration(config):
-    args = {}
-    with open(config, 'r') as f:
-        lines = list(line for line in (l.strip() for l in f) if line)
-    for line in lines:
-        k, v = shlex.split(line)  # shlex to ignore in-quote spaces
-        args[k] = v
-    return args
-
-
-# read configuration files
-config_file = sys.argv[1] if len(sys.argv) == 2 else 'train.conf'
-args = parse_configuration(config_file)
-
-x_depth = [int(d) for d in args["x_depth"].split()]
-
-vae = MVAE(x_depth=x_depth,
-           enc_rnn_dim=args["enc_rnn_dim"], enc_dropout=args["enc_dropout"],
-           dec_rnn_dim=args["dec_rnn_dim"], dec_dropout=args["dec_dropout"],
-           cont_dim=args["cont_dim"], cat_dim=args["cat_dim"], mu_force=args["mu_force"],
-           t_gumbel=args["t_gumbel"], style_embed_dim=args["style_embed_dim"],
-           kl_reg=args["kl_reg"],
-           beta_anneal_steps=args["kl_anneal"])
-
+import json
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--restore_path", default=None, type=str)
-ap.add_argument("--output_type", default="all", type=str)
-ap.add_argument("--min_pitch", default=21, type=int)
-ap.add_argument("--max_pitch", default=108, type=int)
+ap.add_argument("--params_path", required=True, type=str)
 ap.add_argument("--genre", default=0, type=int)
-ap.add_argument("--n_generations", default=2, type=int)
-ap.add_argument("--output_path", required=True, type=str)
+ap.add_argument("--cat_dim", default=2, type=int)
+ap.add_argument("--n_generations", default=1, type=int)
+ap.add_argument("--output_path", default="test-gen", type=str)
+
+x_depth = [89, 33, 33]
 
 args = ap.parse_args()
+
+with open(args.params_path, 'r') as f:
+    params = "".join(f.readlines())
+
+params = json.loads(params)
+
+vae = MVAE(x_depth=x_depth,
+        enc_rnn_dim=params['enc_rnn_dim'], enc_dropout=params['enc_dropout'],
+        dec_rnn_dim=params['dec_rnn_dim'], dec_dropout=params['dec_dropout'],
+        cont_dim=params['cont_dim'], cat_dim=args.cat_dim, mu_force=1.3,
+        t_gumbel=params['t_gumbel'], style_embed_dim=params['style_dim'],
+        kl_reg=params['kl_reg'],
+        beta_anneal_steps=params['beta_anneal_steps'],
+        rnn_type=params['rnn_type'], attention=params['attention'])
+
 if args.restore_path:
     print('restoring weights from ' + args.restore_path)
     vae.load_weights(args.restore_path)
 
 
-gen = MGenerator(args.min_pitch, args.max_pitch, x_depth, vae)
+gen = MGenerator(21, 108, x_depth, vae)
 midis = gen.generate(args.genre, args.n_generations)
 
 if(os.path.exists(args.output_path) == False):
     os.makedirs(args.output_path)
 
-fs = FluidSynth()
 for i, midi in enumerate(midis):
-    if args.output_type == "midi":
-        midi.write("{}/{}.mid".format(args.output_path, i))
-    # elif args.output_type == "wav":
-        # audio = midi.fluidsynth(44100, "piano.sf2").astype(np.float32)
-        # fs.midi_to_audio(midi, args.output_path)
-        # wavfile.write("{}/{}.wav".format(args.output_path, i), 44100, audio)
-    elif args.output_type == "all":
-        midi.write("{}/{}.mid".format(args.output_path, i))
-        fs.midi_to_audio("{}/{}.mid".format(args.output_path, i), "{}/{}.wav".format(args.output_path, i))
+    midi.write("{}/{}.mid".format(args.output_path, i))

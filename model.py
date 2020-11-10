@@ -28,6 +28,8 @@ class MVAE(tfk.Model):
         self.rnn_type = rnn_type
         self.attention = attention
 
+        self.anneal_kl_loss = True
+
         enc_rnn_dim = int(enc_rnn_dim)
         enc_dropout = float(enc_dropout)
         dec_rnn_dim = int(dec_rnn_dim)
@@ -74,6 +76,7 @@ class MVAE(tfk.Model):
         self.p_acc_tracker = tfk.metrics.Mean(name="p_accuracy_tracker")
         self.dt_acc_tracker = tfk.metrics.Mean(name="dt_accuracy_tracker")
         self.d_acc_tracker = tfk.metrics.Mean(name="d_accuracy_tracker")
+        self.style_acc_tracker = tfk.metrics.Mean(name="style_accuracy_tracker")
         
         # test metric trackers
         self.val_recon_loss_tracker = tfk.metrics.Mean(name="val_recon_loss_tracker")
@@ -84,9 +87,13 @@ class MVAE(tfk.Model):
         self.val_p_acc_tracker = tfk.metrics.Mean(name="val_p_accuracy_tracker")
         self.val_dt_acc_tracker = tfk.metrics.Mean(name="val_dt_accuracy_tracker")
         self.val_d_acc_tracker = tfk.metrics.Mean(name="val_d_accuracy_tracker")
+        self.val_style_acc_tracker = tfk.metrics.Mean(name="val_style_accuracy_tracker")
         
         # generic accuracy used for computing raw accuracies
         self.accuracy_tracker = tfk.metrics.Accuracy(name='accuracy_tracker')
+
+    def set_kl_anneal(self, value):
+        self.anneal_kl_loss = value
 
     def get_initial_rnn_state(self, Z):
         if self.rnn_type == 'lstm':
@@ -114,6 +121,7 @@ class MVAE(tfk.Model):
         self.p_acc_tracker.reset_states()
         self.dt_acc_tracker.reset_states()
         self.d_acc_tracker.reset_states()
+        self.style_acc_tracker.reset_states()
         
         self.val_recon_loss_tracker.reset_states()
         self.val_kl_loss_tracker.reset_states()
@@ -123,6 +131,7 @@ class MVAE(tfk.Model):
         self.val_p_acc_tracker.reset_states()
         self.val_dt_acc_tracker.reset_states()
         self.val_d_acc_tracker.reset_states()
+        self.val_style_acc_tracker.reset_states()
 
     def call_encoder_rnn(self, X_embed, S, training):
         # create mask for padded inputs. Ignore <end> token. TODO: should stop gradient?
@@ -209,59 +218,111 @@ class MVAE(tfk.Model):
         # we require that output equal to network input X (with the final <END> token) as a seq2seq.
         logits = self.logit_layer(ouptut)
         return logits
+
+    def embed_to_latent_mean(self, X, S):
+        X_embed = self.embed_input(X)
+        mean, _, _ = self.encode(X_embed, S, training=False)
+        return mean
+
+    def sample_interpolation(self, Xa, Xb, Sa, Sb, a):
+        Xa_embed = self.embed_input(Xa)
+        Xb_embed = self.embed_input(Xb)
+            
+        mean_a, logvar_a, cat_logit_a = self.encode(Xa_embed, Sa, training=False)
+        mean_b, logvar_b, cat_logit_b = self.encode(Xb_embed, Sb, training=False)
+
+        z_cont = self.reparametrize(mean_a, logvar_a)
+        z_cat = self.reparametrize_cat(cat_logit_a, training=False)
+        z_cat = tf.linalg.matmul(z_cat, self.style_embedding)
+        
+        za = tf.concat([z_cont, z_cat], axis=-1)
+
+        z_cont = self.reparametrize(mean_b, logvar_b)
+        z_cat = self.reparametrize_cat(cat_logit_b, training=False)
+        z_cat = tf.linalg.matmul(z_cat, self.style_embedding)
+
+        zb = tf.concat([z_cont, z_cat], axis=-1)
+
+        z_a2b = zb - za
+
+        # z = za + a * z_a2b
+        z = (1 - a) * za + a * zb
+        def sample_fn(logits):    
+            logits = tf.split(logits, self.x_depth, axis=-1)
+
+            samples = [self.ohc(logits=logit, dtype=tf.float32).sample() for logit in logits]
+            samples = tf.concat(samples, axis=-1)
+
+            return samples
+        
+        state = self.get_initial_rnn_state(z)
+
+        x = self.create_start_token(1)
+        for _ in range(512):
+            x_embed = self.embed_input(x)
+            o = self.call_decoder_rnn(x_embed, init_state=state, S=None, training=False)
+            
+            # only keep the final output
+            o = o[:, -1, :]
+            o = tf.reshape(o, shape=(-1, 1, self.enc_rnn_dim))
+            
+            # compute logits
+            logits = self.logit_layer(o)
+            samples = sample_fn(logits)
+            
+            # combine 'sequence until now' with the generated output
+            x = tf.concat([x, samples], axis=1)
+            
+            # if is_finished(samples):
+            #     break
+        
+        return x[:, 1:, :]
     
     # generate batch_size random pieces of the given style
     # style should be an integer
     def sample(self, genre, batch_size=16, eps=None, max_iterations=512):
+
+        # TODO: test that this new implementation is ok
+        def sample_fn(logits):    
+            logits = tf.split(logits, self.x_depth, axis=-1)
+
+            samples = [self.ohc(logits=logit, dtype=tf.float32).sample() for logit in logits]
+            samples = tf.concat(samples, axis=-1)
+
+            return samples
+
+        x = self.create_start_token(batch_size)
         
-        def sample_single_batch():
-            def sample_fn(logits):    
-                logits = tf.split(logits, self.x_depth, axis=-1)
-
-                samples = [self.ohc(logits=logit, dtype=tf.float32).sample() for logit in logits]
-                samples = tf.concat(samples, axis=-1)
-
-                return samples
-            
-            def is_finished(samples):
-                p, _, _ = tf.split(samples, self.x_depth, axis=-1)
-                p = tf.argmax(tf.squeeze(p))
-                return p == 88
-                   
-            x = self.create_start_token(1)
-            
-            z_cont = tf.random.normal(shape=(1, self.cont_dim))
-            z_cat = np.zeros((1, self.cat_dim), np.float32)
-            z_cat[:, genre] = 1
-            z_cat = tf.linalg.matmul(z_cat, self.style_embedding)
-            
-            z = tf.concat([z_cont, z_cat], axis=-1)
-            
-            state = self.get_initial_rnn_state(z)
-
-            for _ in range(max_iterations):
-                x_embed = self.embed_input(x)
-                o = self.call_decoder_rnn(x_embed, init_state=state, S=None, training=False)
-                
-                # only keep the final output
-                o = o[:, -1, :]
-                o = tf.reshape(o, shape=(-1, 1, self.enc_rnn_dim))
-                
-                # compute logits
-                logits = self.logit_layer(o)
-                samples = sample_fn(logits)
-                
-                # combine 'sequence until now' with the generated output
-                x = tf.concat([x, samples], axis=1)
-                
-                if is_finished(samples):
-                    break
-            
-            # discard first timestep, the start token
-            return x[0, 1:, :]
+        z_cont = tf.random.normal(shape=(batch_size, self.cont_dim))
+        z_cat = np.zeros((batch_size, self.cat_dim), np.float32)
+        z_cat[:, genre] = 1
+        z_cat = tf.linalg.matmul(z_cat, self.style_embedding)
         
-        return [sample_single_batch() for _ in range(batch_size)]
-    
+        z = tf.concat([z_cont, z_cat], axis=-1)
+        
+        state = self.get_initial_rnn_state(z)
+
+        for _ in range(max_iterations):
+            x_embed = self.embed_input(x)
+            o = self.call_decoder_rnn(x_embed, init_state=state, S=None, training=False)
+            
+            # only keep the final output
+            o = o[:, -1, :]
+            o = tf.reshape(o, shape=(-1, 1, self.enc_rnn_dim))
+            
+            # compute logits
+            logits = self.logit_layer(o)
+            samples = sample_fn(logits)
+            
+            # combine 'sequence until now' with the generated output
+            x = tf.concat([x, samples], axis=1)
+            
+            # if is_finished(samples):
+            #     break
+        
+        # discard first timestep, the start token
+        return x[:, 1:, :]
+
     def compute_reconstruction_accuracy(self, logits, X, seq_len):
         # logits = model(X)
         logits = tf.split(logits, self.x_depth, axis=-1)
@@ -280,6 +341,17 @@ class MVAE(tfk.Model):
             
             accuracy.append(self.accuracy_tracker.result())
             
+        return accuracy
+
+    def compute_style_accuracy(self, logits, z_cat):
+        # logits = model(X)
+        tmp_z_cat = tf.argmax(z_cat, axis=-1, output_type=tf.int32)
+        tmp_logits = tf.argmax(logits, axis=-1, output_type=tf.int32)
+
+        self.accuracy_tracker.reset_states()
+        self.accuracy_tracker.update_state(tmp_z_cat, tmp_logits)
+        accuracy = self.accuracy_tracker.result()
+
         return accuracy
 
     def compute_loss(self, logits, X, seq_len):
@@ -339,21 +411,26 @@ class MVAE(tfk.Model):
         beta = 1.0 - self.beta_anneal_steps / (self.beta_anneal_steps + tf.exp(self.anneal_step / self.beta_anneal_steps))
         beta = tf.cast(beta, tf.float32)     
 
-        loss = recon_loss + self.kl_reg * beta * kl_loss + mu_loss + style_loss
+        if self.anneal_kl_loss:
+            loss = recon_loss + self.kl_reg * beta * kl_loss + mu_loss + style_loss
+        else:
+            loss = recon_loss + kl_loss + mu_loss + style_loss
         
         pitch_acc, dt_acc, dur_acc = self.compute_reconstruction_accuracy(logits, X, S)
+        style_acc = self.compute_style_accuracy(cat_logit, labels)
         
         self.val_recon_loss_tracker.update_state(recon_loss)
         self.val_kl_loss_tracker.update_state(kl_loss)
         self.val_style_loss_tracker.update_state(style_loss)
         self.val_loss_tracker.update_state(loss)
         
+        self.val_style_acc_tracker.update_state(style_acc)
         self.val_p_acc_tracker.update_state(pitch_acc)
         self.val_dt_acc_tracker.update_state(dt_acc)
         self.val_d_acc_tracker.update_state(dur_acc)
         
         return { "loss": self.val_loss_tracker.result(), "recon_loss": self.val_recon_loss_tracker.result(), "kl_loss": self.val_kl_loss_tracker.result(),
-                 "style_loss": self.val_style_loss_tracker.result(),
+                 "style_loss": self.val_style_loss_tracker.result(), "style_acc": self.val_style_acc_tracker.result(),
                  "p_acc": self.val_p_acc_tracker.result(), "dt_acc": self.val_dt_acc_tracker.result(), "dur_acc": self.val_d_acc_tracker.result() }
         
     def train_step(self, data):
@@ -362,7 +439,7 @@ class MVAE(tfk.Model):
         with tf.GradientTape() as tape:
             labels = tf.one_hot(labels, self.cat_dim)
             self.anneal_step.assign_add(1.0)
-            self.learning_rate = tf.maximum(5e-4 * 0.95 ** ((self.anneal_step - 10000) / 5000), 1e-4)
+            # self.learning_rate = tf.maximum(5e-4 * 0.95 ** ((self.anneal_step - 10000) / 5000), 1e-4)
             
             X_embed = self.embed_input(X)
             
@@ -384,15 +461,19 @@ class MVAE(tfk.Model):
             beta = 1.0 - self.beta_anneal_steps / (self.beta_anneal_steps + tf.exp(self.anneal_step / self.beta_anneal_steps))
             beta = tf.cast(beta, tf.float32)     
             
-            loss = recon_loss + self.kl_reg * beta * kl_loss + mu_loss + style_loss
+            if self.anneal_kl_loss:
+                loss = recon_loss + self.kl_reg * beta * kl_loss + mu_loss + style_loss
+            else:
+                loss = recon_loss + kl_loss + mu_loss + style_loss
             
         trainable_vars = self.trainable_variables
         
         gradients = tape.gradient(loss, trainable_vars)
-        self.optimizer.lr.assign(self.learning_rate)
+        # self.optimizer.lr.assign(self.learning_rate)
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
         
         pitch_acc, dt_acc, dur_acc = self.compute_reconstruction_accuracy(logits, X, S)
+        style_acc = self.compute_style_accuracy(cat_logit, labels)
         
         # gather metrics (mean is taken over the entire epoch)
         self.recon_loss_tracker.update_state(recon_loss)
@@ -403,9 +484,11 @@ class MVAE(tfk.Model):
         self.p_acc_tracker.update_state(pitch_acc)
         self.dt_acc_tracker.update_state(dt_acc)
         self.d_acc_tracker.update_state(dur_acc)
+        self.style_acc_tracker.update_state(style_acc)
         
+        # "l_r": self.optimizer._decayed_lr(tf.float32),
         return { "loss": self.loss_tracker.result(), "recon_loss": self.recon_loss_tracker.result(), "kl_loss": self.kl_loss_tracker.result(),
-                 "style_loss": self.style_loss_tracker.result(), "l_r": self.learning_rate,
+                 "style_loss": self.style_loss_tracker.result(), "style_acc": self.style_acc_tracker.result(), "l_r": self.optimizer._decayed_lr(tf.float32),
                  "p_acc": self.p_acc_tracker.result(), "dt_acc": self.dt_acc_tracker.result(), "dur_acc": self.d_acc_tracker.result() }
     
     # should be used only for model summary -- computation is wrong -- dimensionality is right (we hope)
